@@ -1,0 +1,29 @@
+作为一个严肃的可以操作的系统，你需要考虑这么几个方面：
+1. 数据持久化(persistent) （历史数据的查询，以及服务器crash之后的重新恢复）
+2. 可扩展性(extensibility)
+3. 实时性(realtime) 与误差的trade off
+4. 稳定性(stability)
+5. 可用性(availability)
+6. scalability - 这点存疑一下，因为需求并不明确
+
+先考虑最原始但是可用的方法以及其中的几个关键点。
+
+考虑到availability和stability，首先你不能有single point of failure。你要有一个分布式的队列服务，即使你的后端服务器crash，也不会丢失现在正在产生的数据。在你的服务器重新上线之后，可以继续处理在队列中累积的数据。这里的队列服务可用kafka或者kinesis.
+
+persistent layer，因为我们这里先讲最原始的办法，我们只考虑用relational database。把所有data都存在一个地方显然是比较蠢的办法。比较理性的做法是按照IP hash，然后无论你是partition也好，还是干脆就分不同的table也好（因为IP的key空间是钉死的），把他们分到不同的服务器上去均衡负载。你的database server要有备份。要有slave，当master下线时slave仍然可以提供只读服务。
+
+你的服务层要有redundancy, 一台机器因故下线了还可以有其它的顶住。
+
+查询时从每个database查询top 10然后一个heap来merge result就好了。
+
+上面这个解决方案是基本可行的，基于ip address的空间并不是很大，Oracle的db可以支持上G的table问题不大，你partition个四五次就还可以支持。
+
+当然也有问题，比如说，写操作会很频繁，我们需要cache多次访问记录然后batch update，这里就涉及到了稳定性问题，因为你在什么地方cache这个中间结果，什么地方就有可能出问题，出了问题你就会丢数据。而在cache和真正写之间，也会有accuracy的问题。
+
+所以如果要处理非常大的数据两，需要稍微fancy一点的解决方案。
+
+比如说后端数据库，可以换用任何一种key-value store，或者推到极致，我们只需要raw访问记录。
+
+然后将访问记录持久化到我们的分布式文件系统中，比如HDFS。这里能解决的是后端数据库的scale问题。我们需要周期性地在这个文件系统上跑Map-Reduce job，以获得更新的记录。然而要注意的是MR是非常慢的一个过程，通过MR sort算出来的结果往往是几个小时之前的了。Anyway到这个point，我们能够获得一个几小时前的访问频率的排名。
+
+然后近几个小时中的访问频率，我们可以用apache storm来做stream处理，在服务层和之前MR预处理过的结果combine起来（一共才4G个条目，这里因为我们所有的历史结果都已经persistent，所以顶楼提到的内存处理方法是可行的——可以用数台机器，每台返回其上的前10，最后combine），得到最终的结果。
