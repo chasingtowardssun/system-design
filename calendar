@@ -1,0 +1,38 @@
+https://www.jiuzhang.com/qa/3498/
+
+Scenario
+create event
+invite user
+notify users at specific time
+notify user periodically
+Service
+User Service. 负责管理用户数据。
+Event Service. 负责管理用户创建的 Events
+Notification Service。负责notify用户某个 event 到了
+Storage
+这个题考点并不在存在什么数据库里，所以应该不会追问。主要的考点会是问 Event 要怎么存来实现 notify user at specific time 和periodically.
+
+Event 大概需要存
+
+created_by (谁创建的)
+strategy (一次性的，还是周期的。如果是周期的，那么周期的策略是什么，每周，还是每周末，还是什么，可以用一个具体的结构化数据表示出来，并serialize成json之类的存起来）
+next_notify_time（下一次什么时候提醒，注意这里是下一次什么时候提醒，而不是第一次什么时候提醒）
+attendes: many to many 的 users（实际上会存成另外一张表，记录哪个用户参与了哪个event）
+下面整理一个完整的流程：
+
+create event 就是数据库的 create 呗。
+invite user。就是在 manytomany 的表里加一条记录，顺便记录一个状态，这个用户接受了邀请没有。
+notify user at specific time。
+首先我们需要搞清楚，到底要 notify 什么。这里有这么几种可能性：
+
+A. 手机上弹出一个 notification 提醒用户。这个非常简单，这个不用走服务器那边。只需要用户的手机每隔一段时间 pull 一下最新数据，然后将需要提醒的event，按照 next_notify_time 倒序，然后用一个regular的进程每分钟看一眼就行了。因为一个用户登陆了自己的账户之后，才会被提醒。
+B. 给用户发一封邮件之类的进行提醒。这个就比较难了，因为需要通过服务器去纷发。做法可以是这样，首先我们需要一个 MessageQueue 来做提醒任务的Broker（也就是消息队列来存需要马上去提醒的任务），然后有一个进程不断扫描数据库里的已经到了需要提醒的时间点（保险起见，减去1分钟），但是还没有提醒的 Events。然后把这些events标记为正在提醒，丢给 MessageQueue，然后启动一些专门复杂发邮件的机器，订阅 MessageQueue，这些机器得到了任务之后，就去发邮件，并且把任务标记为已经完成。
+
+notify user periodically
+其实看起来有点难，实际不难，只要你在第3步中完成了提醒之后，根据strategy看一下这个event是现在就结束呢，还是还有下一次提醒。如果还有下一次提醒，计算好下一次的时间，然后存更新一下 event 的next_notify_time 就好了。
+Scale
+Scale要看面试官问你什么具体的问题你具体去答了。从我看来，如果是手机那边的提醒，其实没什么难的，因为是手机local自己提醒，所以只要定期 Pull 新数据就好了。这个很容易 scale。
+
+主要难Scale 的是，如果是发邮件提醒的那种events，要从服务器端来处理。那么一个进程扫描整个数据库看看到时间的 events有哪些这个是很慢很慢的。所以需要多加机器，通过sharding分开处理。我的想法是按照 created_by 的 user_id 进行 sharding 来让 events存在不同的数据库里。然后弄若干个进程，每个进程负责一个 micro sharding （一个进程负责不了一整个数据库，所以可以按照 micro sharding 来分任务），然后每个进程 Regular 的扫描自己的 micro sharding 中到期的 events，然后创建提醒任务，丢给 MessageQueue。
+
+然后你可能会问 MessageQueue 会不会是瓶颈，答案是一般不会，MessageQueue 的性能是很强的，而且很多 MessageQueue 的技术很成熟，可以有 双 master 之类的模式来保证自己不挂。另外就是 MessageQueue 也可以有很多个呀，你指定好一个规则让不同的 扫描进程发送给不同的 Message Queue 就好了。
