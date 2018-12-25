@@ -1,0 +1,122 @@
+KV Store这道题的问题是设计一个transaction， 有一个start() 方法， 返回一个transaction id. 有一个put(transactionId, String key, int value), 有一个get(transactionId, String key), 和一个commit(transactionID)。 要理解这道题到底什么意思， 首先得先翻翻Database的书， 看下transaction那一章， transaction的四个属性ACID。 主要是Isolation level。 transaction有四个level， Read Uncommitted, Read Committed, Repeatable Read和Serializable。 根据面试官的要求， 你要实现其中的一个level， 比如面试官如果说这个transaction会用在bank system里面， 那么最好就是实现Repeatable Read那个level。 因为这个level可以避免dirty reads, non-repeatable reads, and lost updates。想象下如果有两个transaction以下面这个顺序进行读写(假设a之前的值为1)
+start()  // start transaction 1
+start() // start transaction 2
+int val1 = get(1, "a");
+int val2 = get(2, "a");
+put(1, "a", val1+1);
+put(2, "a", val2+1);
+commit(1);
+commit(2);
+那么transaction 1的操作就会overwritten， 这个就是update lost。 . check 1point3acres for more.
+解决update lost就需要实现repeatable read， 意思就是当一个transaction得到一个key的读的lock时， 要一直hold这个lock到这个transaction结束为止。 这样一来当例子中的第二个transaction要读a的时候就会被拒绝。 根据面试官的要求， 一般会直接throw一个error然后把第二个transaction取消掉（rollback之前所有已做过的操作）。 还有一点要注意的是， 这其实是一个单线程题， 所以不需要考虑多线程， 比如上一个例子中所有code都是有时间先后顺序的， 因为他们都发生在同一个thread里。 至于在实现锁的这块， 可以使用Map来记录当前哪些key已经有读的锁， 哪些有写的锁。 如果一个key已经有读的锁， 那么其他transaction只能获得读的锁， 如果一key已经有写的锁， 那么其他transaction不能再获得读或写的锁。 还有一点要注意的是， 一个key上的锁如果只有一个transaction并且此时要求锁的那个transaction就是holding锁的那个transaction， 那么这个transaction的读或写应该被允许。 如果一个transaction之前改变了一个值， 在后来的操作发现有conflict， 那么要把这个transaction之前修改过的值都改回原先值。
+比如说有这些操作，
+start()  // start transaction 1
+start() // start transaction 2
+int val1 = get(1, "a");
+put(2, "b", 2);
+put(2, "a", 2);
+commit(1);
+commit(2);
+
+当transaction 2 改b的值时， b的值可以被成功修改， 但是当transaction 2 修改a的值时，因为此时a的lock已经被transaction 1 hold， 所以这里有一个conflict， 所以transaction 2要被cancel掉。这里可以用一个Map来记录一个key和它原先的值， 每一个transaction都有一个这样的map。 当发现一个transaction需要被cancel时， 把这个transaction之前改过的所有key都要恢复原来的值。这道题的基本就是这个意思了。面试的时候要跟面试官讨论到底要实现那种isolation level。 isolation level越高越复杂。
+
+接下来讲解web crawler
+这道题给了一个get_links(String initialUrl) 要你写个方法来搜集能从这个initialUrl能够搜到的所有url。最先的方法是BFS， 用一个Set记录已经crawl过的url， 用一个queue来记录还没crawl过的。 这里楼主使用的是BFS， 因为in practice大部分搜索引擎都是用BFS。 用DFS会有若干劣势， 比如1. Takes long time to find high quality pages. 2. make the crawler focus on a few sites
+3. it's easy for web crawler to get stuck in artificially crafted web crawler trap. 然后面试官会问你最花时间的部分是哪， 然后如何改善。 然后你可以说使用多线程。 在多线程的时候， 很多人会用现成的ConcurentHashMap或者LinkedBlockingQueue来代替， 这么写当然没问题。 但是考官想要看到的还是你使用noncurrent的数据结构， 用synchronized block（如果你用Java）把修改数据结构的部分wrap起来， 然后再加上wait()和notifyAll(). 代码如下
+public void crawl() {
+    OUTER_LOOP: while(true) {
+        String nextUrl;
+        synchronized(this) {
+            while(queue.isEmpty()) {
+                if(workingThreads==0 && queue.isEmpty()) { //<======= exit condition
+                    break;
+                }
+                try {
+                    wait();    
+                } catch(InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+            nextUrl = queue.poll();
+            workingThreads++;
+        }
+        List<String> urls=getUrls(nextUrl);
+
+        synchronized(this) {
+            for(String newUrl: urls) {
+                if(!visited.contains(newUrl)) {
+                    queue.offer(newUrl);
+                    visited.add(newUrl);
+                }
+            }
+            workingThreads--;
+            notifyAll();
+        }
+    }
+}
+-baidu 1point3acres
+这个代码是带有exit条件。 判定是否可以exit， 可以使用一个workingThreads的变量， 当一个thread拿到新的url要call getUrls前， increment workingThreads。 在第二个synchronized block结束前decrement workingThreads. 然后在代码中标记的那行查看是不是没有thread在work并且queue是空的， 如果成立即可break 那个OUTER_LOOP。 这样所有thread都会顺利exit。 如果没有加exit的代码， 那么所有thread在搜完所有url以后就会停在wait()那行永远在那等待被唤醒。 记住getUrls() 那行一定不能在synchronized block里， 因为那行我们需要它能被多个thread同时执行， 如果放进了synchronized block里也就变成单线程， 就失去了把它写成多线程的意义。
+接着讲Token Bucket 。TokenBucket就是让建一个TokenBucket的class， constructor需要传入一个capacity， 就是这个Bucket里面所能容纳的token以及产生token的速率。然后要写一个getTokens(int n)方法， 需要支持多线程。 我之前在网上找到了一个git。大家也可以去搜索一下。 我的版本就是那个git的简化版。代码如下
+public class TokenBucket {
+        int size = 0;
+        int maxCapacity;
+        int tokensPerUnit;. From 1point 3acres bbs
+        int timeInNanos;
+        LocalDateTime lastFillTime;
+
+        TokenBucket(int maxCapacity, int tokensPerUnit, int time, ChronoUnit unit) {
+                this.maxCapacity = maxCapacity;
+                this.tokensPerUnit = tokensPerUnit;
+                timeInNanos = (int) Duration.of(time, unit).toNanos();
+                lastFillTime = LocalDateTime.now();
+                size = 0;
+        }
+
+        public void getTokens(int n) {
+                if(n<0 || n>maxCapacity) {
+                        throw new RuntimeException("You can only take a number of token greater than or equal to 0 and less than or equal to maxCapacity");
+                }
+                int taken = 0;
+
+                while(true) {
+                        synchronized(this) {
+                                refill();
+                                if(size>=1) {  // <====优化后的代码
+                                        size-=1;
+                                        taken++;
+                                        System.out.println("Thread "+Thread.currentThread().getId()+" gets 1 tokens");
+                                }
+                        }
+                        if(taken==n) {
+                                // System.out.println("Thread "+Thread.currentThread().getId()+" gets "+taken+" tokens");
+                                break;
+                        }
+                        try{
+                                Thread.sleep(1);        
+                        } catch(InterruptedException e) {
+                                e.printStackTrace();
+                        }
+                }
+        }
+
+        public synchronized void put(int n) {
+                size = Math.min(maxCapacity, size+n);
+        }
+
+        private synchronized void refill() {
+                LocalDateTime now = LocalDateTime.now();
+                long durationInNano = Duration.between(lastFillTime, now).toNanos();
+                long tokensToAdd = Math.max(0, tokensPerUnit*durationInNano/timeInNanos);
+                if(tokensToAdd>0) {
+                        size = Math.min(maxCapacity, (int) (size+tokensToAdd));
+                        lastFillTime = now;
+                } 
+        }
+}
+
+大致意思就是每次call getTokens() 方法时， 计算当前时间和上次refill的时间差， 
+如果算出的时间差*token产生速率>1的话我们就要更新桶里token数量和lastFillTime。 然后对比getTokens()要取的token数和桶中的token数，
+如果足够那就给token， getTokens()方法顺利结束。
+如果不够， 那么就进入循环一直休息直到有足够token产生。 注意我给出的代码是优化版的。在代码里标注了优化的部分， 
+这么写的好处是如果有一个thread call getTokens() with a large number， 
+但是一直有其他thread call getTokens() with a small number， 那么那个thread将会一直处在starving的状态， 因为桶里的token一直被拿走无法达到足够数量。 加入优化的部分后， 每个thread无论要几个token， 每次都给一个直到给足为止。
